@@ -32,10 +32,9 @@ def health():
 
 def start_flask():
     port = int(os.environ.get("PORT", 8000))
-    threading.Thread(
-        target=lambda: flask_app.run(host="0.0.0.0", port=port),
-        daemon=True,
-    ).start()
+    # Iniciamos Flask de forma aislada para que Render sea feliz con el puerto web
+    t = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=port), daemon=True)
+    t.start()
 
 # ── Async album accumulator ───────────────────────────────────────────────────
 CACHE_TTL: int = 600
@@ -167,8 +166,16 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error("Error while copying reference: %s", exc)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-async def arranque_async(token):
-    # Usamos el builder estándar pero dentro de un entorno asíncrono controlado manualmente
+def main():
+    # 1. Encendemos el servidor web primero
+    start_flask()
+
+    token = os.environ.get("TOKEN")
+    if not token:
+        print("❌ ERROR: TOKEN environment variable is not set.")
+        return
+
+    # 2. Construimos la aplicación de la forma nativa y más estable
     app = Application.builder().token(token).build()
 
     app.add_handler(
@@ -187,28 +194,10 @@ async def arranque_async(token):
         )
     )
 
-    # Inicialización limpia paso a paso (Esquiva por completo los bugs de hilos de Python 3.14)
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     print("🚀 Bot UkW en marcha — listo en la nube de Render.")
     
-    # Mantener el bucle corriendo sin bloquear Flask
-    while True:
-        await asyncio.sleep(3600)
-
-def main():
-    start_flask()
-
-    token = os.environ.get("TOKEN")
-    if not token:
-        print("❌ ERROR: TOKEN environment variable is not set.")
-        return
-
-    # Creamos un bucle de eventos nuevo y limpio de forma manual para evitar choques
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(arranque_async(token))
+    # 3. Usamos el método tradicional pero controlando las señales para evitar que Render lo mate
+    app.run_polling(close_loop=False, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
