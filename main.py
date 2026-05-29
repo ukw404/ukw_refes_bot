@@ -2,8 +2,7 @@ import os
 import time
 import asyncio
 import logging
-import threading
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application,
@@ -23,19 +22,22 @@ logging.basicConfig(
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
 
-# ── Flask health-check (Render requires an open HTTP port) ────────────────────
+# ── Flask Web Server ───────────────────────────────────────────────────────────
 flask_app = Flask(__name__)
+ptb_application = None
 
 @flask_app.route("/")
 def health():
-    return "OK", 200
+    return "Bot UkW Activo via Webhook", 200
 
-def start_flask():
-    port = int(os.environ.get("PORT", 8000))
-    threading.Thread(
-        target=lambda: flask_app.run(host="0.0.0.0", port=port),
-        daemon=True,
-    ).start()
+@flask_app.route("/webhook", methods=["POST"])
+def webhook():
+    """Telegram enviará los mensajes directamente aquí"""
+    if ptb_application:
+        update = Update.de_json(request.get_json(force=True), ptb_application.bot)
+        # Procesamos el mensaje usando el bucle de eventos del sistema
+        asyncio.run_coroutine_threadsafe(ptb_application.process_update(update), asyncio.get_event_loop())
+    return "OK", 200
 
 # ── Async album accumulator ───────────────────────────────────────────────────
 CACHE_TTL: int = 600
@@ -147,31 +149,44 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error("Error while copying reference: %s", exc)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-async def arranque_async(token):
-    app = Application.builder().token(token).build()
-
-    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
-    app.add_handler(CommandHandler("refe", mover_referencia))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    print("🚀 Bot UkW en marcha — listo en la nube de Render.")
-    
-    while True:
-        await asyncio.sleep(3600)
-
 def main():
-    start_flask()
+    global ptb_application
     token = os.environ.get("TOKEN")
+    
+    # Render nos genera de forma automática la URL pública de tu bot
+    render_url = os.environ.get("RENDER_EXTERNAL_URL") 
+
     if not token:
         print("❌ ERROR: TOKEN environment variable is not set.")
         return
 
+    # Configuramos el entorno asíncrono limpio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(arranque_async(token))
+
+    ptb_application = Application.builder().token(token).build()
+
+    ptb_application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
+    ptb_application.add_handler(CommandHandler("refe", mover_referencia))
+    ptb_application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
+
+    # Inicializamos el bot sin encender el polling conflictivo
+    loop.run_until_complete(ptb_application.initialize())
+    loop.run_until_complete(ptb_application.start())
+
+    # Conectamos Telegram con Render de forma automática
+    if render_url:
+        webhook_url = f"{render_url.rstrip('/')}/webhook"
+        loop.run_until_complete(ptb_application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES))
+        print(f"🚀 Webhook enlazado con éxito en: {webhook_url}")
+    else:
+        print("⚠️ Nota: Corriendo en modo local sin RENDER_EXTERNAL_URL")
+
+    print("🚀 Servidor Web Flask listo. Esperando peticiones de Telegram...")
+    
+    # Arrancamos Flask como el proceso principal. Render ama esto.
+    port = int(os.environ.get("PORT", 8000))
+    flask_app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
