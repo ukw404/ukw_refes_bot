@@ -32,9 +32,10 @@ def health():
 
 def start_flask():
     port = int(os.environ.get("PORT", 8000))
-    # Iniciamos Flask de forma aislada para que Render sea feliz con el puerto web
-    t = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=port), daemon=True)
-    t.start()
+    threading.Thread(
+        target=lambda: flask_app.run(host="0.0.0.0", port=port),
+        daemon=True,
+    ).start()
 
 # ── Async album accumulator ───────────────────────────────────────────────────
 CACHE_TTL: int = 600
@@ -72,17 +73,9 @@ def make_caption(original: str | None, mention: str) -> str:
 
 def as_input_media(msg, caption: str | None, parse_mode: str | None):
     if msg.photo:
-        return InputMediaPhoto(
-            media=msg.photo[-1].file_id,
-            caption=caption,
-            parse_mode=parse_mode,
-        )
+        return InputMediaPhoto(media=msg.photo[-1].file_id, caption=caption, parse_mode=parse_mode)
     if msg.video:
-        return InputMediaVideo(
-            media=msg.video.file_id,
-            caption=caption,
-            parse_mode=parse_mode,
-        )
+        return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
 # ── Core handler ───────────────────────────────────────────────────────────────
@@ -126,32 +119,20 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             media_list = []
             for i, part in enumerate(parts):
-                item = as_input_media(
-                    part,
-                    caption    = caption if i == 0 else None,
-                    parse_mode = "HTML"  if i == 0 else None,
-                )
+                item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
                 if item is not None:
                     media_list.append(item)
 
             if not media_list:
                 raise ValueError("Album had no photos or videos to forward.")
 
-            await context.bot.send_media_group(
-                chat_id=ID_SUPERGRUPO,
-                media=media_list,
-                message_thread_id=ID_TEMA_REFES,
-            )
+            await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
             stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
 
         else:
             await context.bot.copy_message(
-                chat_id=ID_SUPERGRUPO,
-                from_chat_id=trigger.chat_id,
-                message_id=target.message_id,
-                message_thread_id=ID_TEMA_REFES,
-                caption=caption,
-                parse_mode="HTML",
+                chat_id=ID_SUPERGRUPO, from_chat_id=trigger.chat_id, message_id=target.message_id,
+                message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
             )
             stamp = f"✅ ¡Esta referencia fue guardada con éxito por {mention} en el tema de Refes!"
 
@@ -166,38 +147,31 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error("Error while copying reference: %s", exc)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-def main():
-    # 1. Encendemos el servidor web primero
-    start_flask()
+async def arranque_async(token):
+    app = Application.builder().token(token).build()
 
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
+    app.add_handler(CommandHandler("refe", mover_referencia))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    print("🚀 Bot UkW en marcha — listo en la nube de Render.")
+    
+    while True:
+        await asyncio.sleep(3600)
+
+def main():
+    start_flask()
     token = os.environ.get("TOKEN")
     if not token:
         print("❌ ERROR: TOKEN environment variable is not set.")
         return
 
-    # 2. Construimos la aplicación de la forma nativa y más estable
-    app = Application.builder().token(token).build()
-
-    app.add_handler(
-        MessageHandler(
-            (filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS,
-            accumulate,
-        ),
-        group=-1,
-    )
-
-    app.add_handler(CommandHandler("refe", mover_referencia))
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(r"(?i)^\.refe"),
-            mover_referencia,
-        )
-    )
-
-    print("🚀 Bot UkW en marcha — listo en la nube de Render.")
-    
-    # 3. Usamos el método tradicional pero controlando las señales para evitar que Render lo mate
-    app.run_polling(close_loop=False, drop_pending_updates=True)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(arranque_async(token))
 
 if __name__ == "__main__":
     main()
