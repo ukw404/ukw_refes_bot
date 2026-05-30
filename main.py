@@ -54,21 +54,20 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
 async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, caption, mgid):
     try:
         if mgid:
-            # CORRECCIÓN: Damos 1.2 segundos exactos para que Telegram termine de registrar todo el álbum
-            await asyncio.sleep(1.2)
+            # ⚡ CORRECCIÓN CLAVE: Esperamos 2.5 segundos de fondo para que las 3 fotos lleguen completas al acumulador
+            await asyncio.sleep(2.5)
             
             parts = list(_album.get(mgid, {}).get("msgs", []))
             
-            # Si por alguna razón la foto a la que respondimos no se guardó en el acumulador, la metemos a la fuerza
+            # Si la foto específica que respondimos no se guardó en el acumulador por milisegundos, la forzamos dentro
             if target.message_id not in {m.message_id for m in parts}:
                 parts.append(target)
             
-            # Ordenamos las fotos por su ID para que no se revuelvan
+            # Ordenamos los mensajes para que el álbum mantenga el orden original de envío
             parts.sort(key=lambda m: m.message_id)
 
             media_list = []
             for i, part in enumerate(parts):
-                # Solo ponemos el texto en la primera foto del álbum para cumplir la regla de Telegram
                 item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
                 if item is not None:
                     media_list.append(item)
@@ -78,7 +77,7 @@ async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, c
                 stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
                 await target.reply_text(stamp, parse_mode="HTML")
         else:
-            # ¡Si es una sola imagen, se copia directo SIN ESPERAR NADA a toda velocidad!
+            # Si es una sola foto individual, se va directo en 0.1 segundos sin esperas
             await context.bot.copy_message(
                 chat_id=ID_SUPERGRUPO, from_chat_id=chat_id, message_id=target.message_id,
                 message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
@@ -108,13 +107,13 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = make_caption(target.caption, mention)
     mgid    = target.media_group_id
 
-    # Borrar el comando inmediatamente
+    # Borrar el comando .refe inmediatamente de forma asíncrona
     try:
         asyncio.create_task(trigger.delete())
     except:
         pass
 
-    # Lanzar la tarea al subsuelo
+    # Enviamos toda la tarea pesada al subsuelo. El bot queda libre de inmediato.
     asyncio.create_task(
         proceso_subterrano_copia(
             context, trigger.chat_id, target, trigger, mention, caption, mgid
@@ -128,12 +127,13 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # IMPORTANTE: El acumulador debe escuchar en el grupo -1 antes que los comandos
+    # Registro estratégico de handlers
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
     app.add_handler(CommandHandler("refe", mover_referencia))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    # ⚡ SEGURO ANTI-CONFLICTO: Forzamos el cierre de conexiones colgadas de Railway
+    app.run_polling(drop_pending_updates=True, close_loop=True)
 
 if __name__ == "__main__":
     main()
