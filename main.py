@@ -1,5 +1,4 @@
 import os
-import time
 import asyncio
 import logging
 from telegram import Update, InputMediaPhoto, InputMediaVideo
@@ -11,25 +10,15 @@ from telegram.ext import (
     filters,
 )
 
-# ── Logging optimizado (Solo errores reales, limpia la pantalla de Railway) ──
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.WARNING,  # <-- CAMBIO: Ya no inundará de letras rojas la consola
-)
+# Mantener la consola de Railway limpia de basura informativa
+logging.basicConfig(level=logging.WARNING)
 
-# ── Configuración del grupo ──────────────────────────────────────────────────
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
 
-# ── Acumulador de Álbumes ─────────────────────────────────────────────────────
-CACHE_TTL: int = 600
+# Acumulador optimizado para álbumes
+CACHE_TTL: int = 300
 _album: dict[str, dict] = {}
-
-def _prune():
-    cutoff = time.time() - CACHE_TTL
-    stale  = [k for k, v in _album.items() if v["ts"] < cutoff]
-    for k in stale:
-        del _album[k]
 
 async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -37,14 +26,13 @@ async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     mgid = msg.media_group_id
     if mgid not in _album:
-        _album[mgid] = {"msgs": [], "ts": time.time()}
+        _album[mgid] = {"msgs": [], "ts": asyncio.get_event_loop().time()}
+    
     known = {m.message_id for m in _album[mgid]["msgs"]}
     if msg.message_id not in known:
         _album[mgid]["msgs"].append(msg)
-        _album[mgid]["ts"] = time.time()
-    _prune()
+        _album[mgid]["ts"] = asyncio.get_event_loop().time()
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
 def user_mention(user) -> str:
     if user.username:
         return f"@{user.username}"
@@ -62,40 +50,11 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
         return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
-# ── Handler Principal (.refe / /refe) ──────────────────────────────────────────
-_ERROR = "❌ Usa este comando respondiendo a una *foto, video o GIF* que quieras enviar."
-
-async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    trigger = update.message
-    if not trigger:
-        return
-
-    async def reject():
-        err = await trigger.reply_text(_ERROR, parse_mode="Markdown")
-        await asyncio.sleep(3)
-        for m in (err, trigger):
-            try:
-                await m.delete()
-            except Exception:
-                pass
-
-    if not trigger.reply_to_message:
-        await reject()
-        return
-
-    target = trigger.reply_to_message
-
-    if not (target.photo or target.video or target.animation or target.document):
-        await reject()
-        return
-
-    mention = user_mention(trigger.from_user)
-    caption = make_caption(target.caption, mention)
-    mgid    = target.media_group_id
-
+# ── PROCESO ASÍNCRONO DE FONDO (Aquí está la magia de la velocidad) ──
+async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, caption, mgid):
     try:
         if mgid:
-            # Si es un álbum, esperamos un momento breve para agrupar las fotos
+            # Si es un álbum, espera solo 1 segundo de forma asíncrona dedicada
             await asyncio.sleep(1.0)
             parts = list(_album.get(mgid, {}).get("msgs", []))
             if target.message_id not in {m.message_id for m in parts}:
@@ -108,45 +67,65 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if item is not None:
                     media_list.append(item)
 
-            if not media_list:
-                raise ValueError("Album vacío.")
-
-            await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
-            stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
-
+            if media_list:
+                await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
+                stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
+                await target.reply_text(stamp, parse_mode="HTML")
         else:
-            # CAMBIO: Si es una foto sola, se envía AL INSTANTE sin esperas
+            # ¡Si es una sola imagen, se copia directo a toda velocidad!
             await context.bot.copy_message(
-                chat_id=ID_SUPERGRUPO, from_chat_id=trigger.chat_id, message_id=target.message_id,
+                chat_id=ID_SUPERGRUPO, from_chat_id=chat_id, message_id=target.message_id,
                 message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
             )
             stamp = f"✅ ¡Esta referencia fue guardada con éxito por {mention} en el tema de Refes!"
+            await target.reply_text(stamp, parse_mode="HTML")
+            
+    except Exception as e:
+        print(f"Error en copia de fondo: {e}")
 
-        try:
-            await trigger.delete()
-        except Exception:
-            pass
+# ── HANDLER PRINCIPAL (REACCIONA EN MILISEGUNDOS) ──
+async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trigger = update.message
+    if not trigger:
+        return
 
-        await target.reply_text(stamp, parse_mode="HTML")
+    if not trigger.reply_to_message:
+        err = await trigger.reply_text("❌ Responde a una foto o video.", parse_mode="Markdown")
+        asyncio.create_task(asyncio.sleep(3)).add_done_callback(lambda _: asyncio.create_task(err.delete()))
+        return
 
-    except Exception as exc:
-        pass  # Evita escribir errores innecesarios en la consola
+    target = trigger.reply_to_message
+    if not (target.photo or target.video or target.animation or target.document):
+        return
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+    mention = user_mention(trigger.from_user)
+    caption = make_caption(target.caption, mention)
+    mgid    = target.media_group_id
+
+    # ⚡ OPTIMIZACIÓN 1: Borrar el comando inmediatamente sin esperar a Telegram
+    try:
+        asyncio.create_task(trigger.delete())
+    except:
+        pass
+
+    # ⚡ OPTIMIZACIÓN 2: Lanzar la copia en un hilo de fondo. El bot queda libre al instante.
+    asyncio.create_task(
+        proceso_subterrano_copia(
+            context, trigger.chat_id, target, trigger, mention, caption, mgid
+        )
+    )
+
 def main():
     token = os.environ.get("TOKEN")
     if not token:
         return
 
-    # Inicia la aplicación limpia
     app = Application.builder().token(token).build()
 
-    # Filtros de escucha
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
     app.add_handler(CommandHandler("refe", mover_referencia))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    # Ejecución directa en modo VPS continuo
     app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
