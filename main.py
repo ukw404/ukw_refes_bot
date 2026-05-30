@@ -2,7 +2,6 @@ import os
 import time
 import asyncio
 import logging
-from flask import Flask, request
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application,
@@ -12,7 +11,7 @@ from telegram.ext import (
     filters,
 )
 
-# ── Logging ────────────────────────────────────────────────────────────────────
+# ── Logging (Para ver todo en la consola de Railway) ───────────────────────────
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -21,34 +20,6 @@ logging.basicConfig(
 # ── Community config ───────────────────────────────────────────────────────────
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
-
-# ── Flask Web Server ───────────────────────────────────────────────────────────
-flask_app = Flask(__name__)
-ptb_application = None
-
-@flask_app.route("/")
-def health():
-    return "Bot UkW Activo via Webhook Nativo", 200
-
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    """Recibe las actualizaciones de Telegram y las procesa de forma segura"""
-    global ptb_application
-    if ptb_application:
-        try:
-            # Convertimos los datos recibidos en un objeto Update de Telegram
-            update = Update.de_json(request.get_json(force=True), ptb_application.bot)
-            
-            # SOLUCIÓN CRÍTICA: Ejecutamos de forma síncrona/aislada para Flask
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(ptb_application.process_update(update))
-            loop.close()
-            
-        except Exception as e:
-            logging.error("Error procesando actualización en webhook: %s", e)
-            
-    return "OK", 200
 
 # ── Async album accumulator ───────────────────────────────────────────────────
 CACHE_TTL: int = 600
@@ -161,41 +132,22 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
-    global ptb_application
     token = os.environ.get("TOKEN")
-    render_url = os.environ.get("RENDER_EXTERNAL_URL") 
-
     if not token:
         print("❌ ERROR: TOKEN environment variable is not set.")
         return
 
-    # Creamos un bucle temporal solo para inicializar el bot de Telegram
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Inicializamos la aplicación limpia en modo Polling (Patrullaje directo)
+    app = Application.builder().token(token).build()
 
-    ptb_application = Application.builder().token(token).build()
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
+    app.add_handler(CommandHandler("refe", mover_referencia))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    ptb_application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
-    ptb_application.add_handler(CommandHandler("refe", mover_referencia))
-    ptb_application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
-
-    # Inicialización interna de componentes
-    loop.run_until_complete(ptb_application.initialize())
-    loop.run_until_complete(ptb_application.start())
-
-    # Registrar la dirección del Webhook en los servidores de Telegram
-    if render_url:
-        webhook_url = f"{render_url.rstrip('/')}/webhook"
-        loop.run_until_complete(ptb_application.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES))
-        print(f"🚀 Webhook configurado con éxito en: {webhook_url}")
-    else:
-        print("⚠️ Nota: Ejecutándose localmente, RENDER_EXTERNAL_URL no detectada.")
-
-    loop.close()
-
-    print("🚀 Servidor Flask en marcha. Escuchando peticiones HTTP de Telegram...")
-    port = int(os.environ.get("PORT", 8000))
-    flask_app.run(host="0.0.0.0", port=port)
+    print("🚀 Bot UkW patrullando en modo continuo (Estilo VPS)...")
+    
+    # Arranca el bucle infinito nativo. No se frena por nada del mundo.
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
