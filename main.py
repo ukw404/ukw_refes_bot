@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 
-# Mantener la consola limpia de Railway
+# Mantener la consola de Railway limpia de basura informativa
 logging.basicConfig(level=logging.WARNING)
 
 ID_SUPERGRUPO = -1003173754617
@@ -50,22 +50,11 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
         return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
-# ── PROCESO ASÍNCRONO CORREGIDO ──
+# ── PROCESO ASÍNCRONO DE FONDO (Aquí está la magia de la velocidad) ──
 async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, caption, mgid):
-    # Lanzamos el borrado del comando en paralelo con una mini espera para asegurar el tiro
-    async def borrar_comando():
-        await asyncio.sleep(0.2) # Pausa de milisegundos para que Telegram registre el mensaje
-        try:
-            await trigger.delete()
-        except:
-            pass
-
-    # Creamos la tarea de borrado de fondo inmediatamente
-    asyncio.create_task(borrar_comando())
-
     try:
         if mgid:
-            # Si es álbum, espera 1 segundo de agrupación dedicada
+            # Si es un álbum, espera solo 1 segundo de forma asíncrona dedicada
             await asyncio.sleep(1.0)
             parts = list(_album.get(mgid, {}).get("msgs", []))
             if target.message_id not in {m.message_id for m in parts}:
@@ -83,7 +72,7 @@ async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, c
                 stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
                 await target.reply_text(stamp, parse_mode="HTML")
         else:
-            # Si es una sola foto, copia directa instantánea
+            # ¡Si es una sola imagen, se copia directo a toda velocidad!
             await context.bot.copy_message(
                 chat_id=ID_SUPERGRUPO, from_chat_id=chat_id, message_id=target.message_id,
                 message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
@@ -92,9 +81,9 @@ async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, c
             await target.reply_text(stamp, parse_mode="HTML")
             
     except Exception as e:
-        print(f"Error en copia: {e}")
+        print(f"Error en copia de fondo: {e}")
 
-# ── HANDLER PRINCIPAL ──
+# ── HANDLER PRINCIPAL (REACCIONA EN MILISEGUNDOS) ──
 async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trigger = update.message
     if not trigger:
@@ -102,11 +91,7 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not trigger.reply_to_message:
         err = await trigger.reply_text("❌ Responde a una foto o video.", parse_mode="Markdown")
-        await asyncio.sleep(3)
-        try:
-            await err.delete()
-            await trigger.delete()
-        except: pass
+        asyncio.create_task(asyncio.sleep(3)).add_done_callback(lambda _: asyncio.create_task(err.delete()))
         return
 
     target = trigger.reply_to_message
@@ -117,7 +102,13 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = make_caption(target.caption, mention)
     mgid    = target.media_group_id
 
-    # Lanzamos toda la operación al subsuelo. El grupo sigue fluyendo rápido.
+    # ⚡ OPTIMIZACIÓN 1: Borrar el comando inmediatamente sin esperar a Telegram
+    try:
+        asyncio.create_task(trigger.delete())
+    except:
+        pass
+
+    # ⚡ OPTIMIZACIÓN 2: Lanzar la copia en un hilo de fondo. El bot queda libre al instante.
     asyncio.create_task(
         proceso_subterrano_copia(
             context, trigger.chat_id, target, trigger, mention, caption, mgid
