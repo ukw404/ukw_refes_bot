@@ -11,17 +11,17 @@ from telegram.ext import (
     filters,
 )
 
-# ── Logging (Para ver todo en la consola de Railway) ───────────────────────────
+# ── Logging optimizado (Solo errores reales, limpia la pantalla de Railway) ──
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.WARNING,  # <-- CAMBIO: Ya no inundará de letras rojas la consola
 )
 
-# ── Community config ───────────────────────────────────────────────────────────
+# ── Configuración del grupo ──────────────────────────────────────────────────
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
 
-# ── Async album accumulator ───────────────────────────────────────────────────
+# ── Acumulador de Álbumes ─────────────────────────────────────────────────────
 CACHE_TTL: int = 600
 _album: dict[str, dict] = {}
 
@@ -62,7 +62,7 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
         return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
-# ── Core handler ───────────────────────────────────────────────────────────────
+# ── Handler Principal (.refe / /refe) ──────────────────────────────────────────
 _ERROR = "❌ Usa este comando respondiendo a una *foto, video o GIF* que quieras enviar."
 
 async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -72,7 +72,7 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def reject():
         err = await trigger.reply_text(_ERROR, parse_mode="Markdown")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         for m in (err, trigger):
             try:
                 await m.delete()
@@ -95,7 +95,8 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if mgid:
-            await asyncio.sleep(1.5)
+            # Si es un álbum, esperamos un momento breve para agrupar las fotos
+            await asyncio.sleep(1.0)
             parts = list(_album.get(mgid, {}).get("msgs", []))
             if target.message_id not in {m.message_id for m in parts}:
                 parts.append(target)
@@ -108,12 +109,13 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     media_list.append(item)
 
             if not media_list:
-                raise ValueError("Album had no photos or videos to forward.")
+                raise ValueError("Album vacío.")
 
             await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
             stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
 
         else:
+            # CAMBIO: Si es una foto sola, se envía AL INSTANTE sin esperas
             await context.bot.copy_message(
                 chat_id=ID_SUPERGRUPO, from_chat_id=trigger.chat_id, message_id=target.message_id,
                 message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
@@ -128,29 +130,25 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await target.reply_text(stamp, parse_mode="HTML")
 
     except Exception as exc:
-        logging.error("Error while copying reference: %s", exc)
+        pass  # Evita escribir errores innecesarios en la consola
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
     token = os.environ.get("TOKEN")
     if not token:
-        print("❌ ERROR: TOKEN environment variable is not set.")
         return
 
-    # Inicializamos la aplicación limpia en modo Polling (Patrullaje directo)
+    # Inicia la aplicación limpia
     app = Application.builder().token(token).build()
 
+    # Filtros de escucha
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
     app.add_handler(CommandHandler("refe", mover_referencia))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    print("🚀 Bot UkW patrullando en modo continuo (Estilo VPS)...")
-    
-    # Arranca el bucle infinito nativo. No se frena por nada del mundo.
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Ejecución directa en modo VPS continuo
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
-
-
-
+    
