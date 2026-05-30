@@ -10,14 +10,15 @@ from telegram.ext import (
     filters,
 )
 
-# Consola limpia en Railway
+# Mantener la consola de Railway limpia de alertas informativas basura
 logging.basicConfig(level=logging.WARNING)
 
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
 
-# Estructura inteligente para controlar los álbumes
-_album: dict[str, dict] = {}
+# Memoria global persistente para los álbumes
+_album: dict[str, list] = {}
+_album_locks: dict[str, bool] = {}
 
 def user_mention(user) -> str:
     if user.username:
@@ -36,7 +37,7 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
         return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
-# ── ACUMULADOR INTELIGENTE CORREGIDO ──
+# ── ACUMULADOR SEGURO DE MEDIA ──
 async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.media_group_id:
@@ -44,59 +45,56 @@ async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     mgid = msg.media_group_id
     
-    # Si es la primera foto del álbum que llega, preparamos el espacio
     if mgid not in _album:
-        _album[mgid] = {
-            "msgs": [],
-            "trigger_seen": False,  # Guarda si el usuario ya puso .refe
-            "user_mention": "",
-            "trigger_msg": None,
-            "target_caption": msg.caption or ""
-        }
-    
-    # Guardamos la foto en la lista si no existía
-    if msg.message_id not in {m.message_id for m in _album[mgid]["msgs"]}:
-        _album[mgid]["msgs"].append(msg)
+        _album[mgid] = []
         
-    # Si el usuario ya puso el comando .refe antes o durante la subida, disparamos el empaquetado
-    if _album[mgid]["trigger_seen"]:
-        await procesar_album_completo(context, mgid)
+    # Agrega la foto o video si no estaba registrado ya
+    if msg.message_id not in {m.message_id for m in _album[mgid]}:
+        _album[mgid].append(msg)
 
-# Función dedicada a esperar y enviar todo el paquete junto
-async def procesar_album_completo(context, mgid):
-    # Damos 2 segundos completos para asegurar que entren las 5 fotos completas a la memoria
-    await asyncio.sleep(2.0)
-    
-    data = _album.get(mgid)
-    if not data or not data["msgs"]:
+# ── PROCESADOR ASÍNCRONO DE ÁLBUMES COMPLETOS ──
+async def procesar_y_enviar_album(context, chat_id, mgid, trigger, target, mention, caption):
+    # Si esta tarea ya se está ejecutando para este álbum, no la duplicamos
+    if _album_locks.get(mgid):
         return
-        
-    # Evitamos que se envíe dos veces si entran más actualizaciones
-    _album[mgid] = {"msgs": []} 
+    _album_locks[mgid] = True
+
+    # ⚡ TIEMPO SEGURO: Esperamos 3.5 segundos completos para que entren las 5 fotos completas
+    await asyncio.sleep(3.5)
     
-    parts = data["msgs"]
-    parts.sort(key=lambda m: m.message_id)
-    
-    mention = data["user_mention"]
-    caption = make_caption(data["target_caption"], mention)
-    
-    media_list = []
-    for i, part in enumerate(parts):
-        item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
-        if item is not None:
-            media_list.append(item)
-            
     try:
+        # Obtenemos todas las fotos que el acumulador guardó en este tiempo
+        parts = _album.get(mgid, [])
+        
+        # Nos aseguramos de incluir la foto a la que se le dio responder originalmente
+        if target.message_id not in {m.message_id for m in parts}:
+            parts.append(target)
+            
+        # Ordenamos las imágenes por ID para mantener el orden estético del usuario
+        parts.sort(key=lambda m: m.message_id)
+
+        media_list = []
+        for i, part in enumerate(parts):
+            # Solo la primera foto lleva el texto descriptivo, las demás van limpias (Regla de Telegram)
+            item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
+            if item is not None:
+                media_list.append(item)
+
         if media_list:
             await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
-            stamp = f"✅ ¡Este álbum de {len(media_list)} fotos fue guardado por {mention}!"
-            if parts:
-                await parts[0].reply_text(stamp, parse_mode="HTML")
-            if data["trigger_msg"]:
-                try: await data["trigger_msg"].delete()
-                except: pass
+            stamp = f"✅ ¡Este álbum de {len(media_list)} fotos fue guardado con éxito por {mention} en el tema de Refes!"
+            await target.reply_text(stamp, parse_mode="HTML")
+            
+            # Borramos el comando .refe una vez completada la migración del álbum
+            try: await trigger.delete()
+            except: pass
+            
     except Exception as e:
-        print(f"Error procesando álbum: {e}")
+        print(f"Error procesando álbum de fondo: {e}")
+    finally:
+        # Limpieza de memoria una vez enviado
+        if mgid in _album: del _album[mgid]
+        if mgid in _album_locks: del _album_locks[mgid]
 
 # ── HANDLER PRINCIPAL ──
 async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,31 +103,20 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target = trigger.reply_to_message
+    if not (target.photo or target.video or target.animation or target.document):
+        return
+
     mention = user_mention(trigger.from_user)
-    mgid = target.media_group_id
+    caption = make_caption(target.caption, mention)
+    mgid    = target.media_group_id
 
     if mgid:
-        # Si es un álbum, inicializamos el registro si no existe
-        if mgid not in _album:
-            _album[mgid] = {
-                "msgs": [target],
-                "trigger_seen": True,
-                "user_mention": mention,
-                "trigger_msg": trigger,
-                "target_caption": target.caption or ""
-            }
-        else:
-            _album[mgid]["trigger_seen"] = True
-            _album[mgid]["user_mention"] = mention
-            _album[mgid]["trigger_msg"] = trigger
-            if target.caption:
-                _album[mgid]["target_caption"] = target.caption
-                
-        # Activamos la espera asíncrona dedicada de fondo
-        asyncio.create_task(procesar_album_completo(context, mgid))
+        # Si es un álbum, lanzamos la tarea pesada al subsuelo con bloqueo de duplicados
+        asyncio.create_task(
+            procesar_y_enviar_album(context, trigger.chat_id, mgid, trigger, target, mention, caption)
+        )
     else:
-        # Si es una sola foto individual, se ejecuta AL INSTANTE en 0.1 segundos
-        caption = make_caption(target.caption, mention)
+        # Si es una sola foto individual, se ejecuta AL INSTANTE en 0.1 segundos sin esperas
         try:
             try: asyncio.create_task(trigger.delete())
             except: pass
@@ -138,9 +125,9 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=ID_SUPERGRUPO, from_chat_id=trigger.chat_id, message_id=target.message_id,
                 message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
             )
-            await target.reply_text(f"✅ ¡Esta referencia fue guardada con éxito por {mention}!", parse_mode="HTML")
+            await target.reply_text(f"✅ ¡Esta referencia fue guardada con éxito por {mention} en el tema de Refes!", parse_mode="HTML")
         except Exception as e:
-            print(f"Error en foto sola: {e}")
+            print(f"Error en foto individual: {e}")
 
 def main():
     token = os.environ.get("TOKEN")
@@ -149,13 +136,13 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # Patrullaje estricto de hilos
+    # El acumulador se registra primero para interceptar toda la multimedia del grupo
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
     app.add_handler(CommandHandler("refe", mover_referencia))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    # Aseguramos que tumbe cualquier proceso zombie colgado en Railway
-    app.run_polling(drop_pending_updates=True, close_loop=True)
+    # drop_pending_updates=True limpia mensajes viejos acumulados durante crasheos
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
