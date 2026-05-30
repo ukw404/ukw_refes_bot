@@ -10,15 +10,28 @@ from telegram.ext import (
     filters,
 )
 
-# Mantener la consola de Railway limpia de alertas informativas basura
+# Mantener la consola de Railway limpia de basura informativa
 logging.basicConfig(level=logging.WARNING)
 
 ID_SUPERGRUPO = -1003173754617
 ID_TEMA_REFES = 12
 
-# Memoria global persistente para los álbumes
-_album: dict[str, list] = {}
-_album_locks: dict[str, bool] = {}
+# Acumulador optimizado para álbumes
+CACHE_TTL: int = 300
+_album: dict[str, dict] = {}
+
+async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.media_group_id:
+        return
+    mgid = msg.media_group_id
+    if mgid not in _album:
+        _album[mgid] = {"msgs": [], "ts": asyncio.get_event_loop().time()}
+    
+    known = {m.message_id for m in _album[mgid]["msgs"]}
+    if msg.message_id not in known:
+        _album[mgid]["msgs"].append(msg)
+        _album[mgid]["ts"] = asyncio.get_event_loop().time()
 
 def user_mention(user) -> str:
     if user.username:
@@ -37,69 +50,48 @@ def as_input_media(msg, caption: str | None, parse_mode: str | None):
         return InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=parse_mode)
     return None
 
-# ── ACUMULADOR SEGURO DE MEDIA ──
-async def accumulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.media_group_id:
-        return
-        
-    mgid = msg.media_group_id
-    
-    if mgid not in _album:
-        _album[mgid] = []
-        
-    # Agrega la foto o video si no estaba registrado ya
-    if msg.message_id not in {m.message_id for m in _album[mgid]}:
-        _album[mgid].append(msg)
-
-# ── PROCESADOR ASÍNCRONO DE ÁLBUMES COMPLETOS ──
-async def procesar_y_enviar_album(context, chat_id, mgid, trigger, target, mention, caption):
-    # Si esta tarea ya se está ejecutando para este álbum, no la duplicamos
-    if _album_locks.get(mgid):
-        return
-    _album_locks[mgid] = True
-
-    # ⚡ TIEMPO SEGURO: Esperamos 3.5 segundos completos para que entren las 5 fotos completas
-    await asyncio.sleep(3.5)
-    
+# ── PROCESO ASÍNCRONO DE FONDO (Aquí está la magia de la velocidad) ──
+async def proceso_subterrano_copia(context, chat_id, target, trigger, mention, caption, mgid):
     try:
-        # Obtenemos todas las fotos que el acumulador guardó en este tiempo
-        parts = _album.get(mgid, [])
-        
-        # Nos aseguramos de incluir la foto a la que se le dio responder originalmente
-        if target.message_id not in {m.message_id for m in parts}:
-            parts.append(target)
-            
-        # Ordenamos las imágenes por ID para mantener el orden estético del usuario
-        parts.sort(key=lambda m: m.message_id)
+        if mgid:
+            # Si es un álbum, espera solo 1 segundo de forma asíncrona dedicada
+            await asyncio.sleep(1.0)
+            parts = list(_album.get(mgid, {}).get("msgs", []))
+            if target.message_id not in {m.message_id for m in parts}:
+                parts.append(target)
+            parts.sort(key=lambda m: m.message_id)
 
-        media_list = []
-        for i, part in enumerate(parts):
-            # Solo la primera foto lleva el texto descriptivo, las demás van limpias (Regla de Telegram)
-            item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
-            if item is not None:
-                media_list.append(item)
+            media_list = []
+            for i, part in enumerate(parts):
+                item = as_input_media(part, caption=caption if i == 0 else None, parse_mode="HTML" if i == 0 else None)
+                if item is not None:
+                    media_list.append(item)
 
-        if media_list:
-            await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
-            stamp = f"✅ ¡Este álbum de {len(media_list)} fotos fue guardado con éxito por {mention} en el tema de Refes!"
+            if media_list:
+                await context.bot.send_media_group(chat_id=ID_SUPERGRUPO, media=media_list, message_thread_id=ID_TEMA_REFES)
+                stamp = f"✅ ¡Este álbum fue guardado con éxito por {mention} en el tema de Refes!"
+                await target.reply_text(stamp, parse_mode="HTML")
+        else:
+            # ¡Si es una sola imagen, se copia directo a toda velocidad!
+            await context.bot.copy_message(
+                chat_id=ID_SUPERGRUPO, from_chat_id=chat_id, message_id=target.message_id,
+                message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
+            )
+            stamp = f"✅ ¡Esta referencia fue guardada con éxito por {mention} en el tema de Refes!"
             await target.reply_text(stamp, parse_mode="HTML")
             
-            # Borramos el comando .refe una vez completada la migración del álbum
-            try: await trigger.delete()
-            except: pass
-            
     except Exception as e:
-        print(f"Error procesando álbum de fondo: {e}")
-    finally:
-        # Limpieza de memoria una vez enviado
-        if mgid in _album: del _album[mgid]
-        if mgid in _album_locks: del _album_locks[mgid]
+        print(f"Error en copia de fondo: {e}")
 
-# ── HANDLER PRINCIPAL ──
+# ── HANDLER PRINCIPAL (REACCIONA EN MILISEGUNDOS) ──
 async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trigger = update.message
-    if not trigger or not trigger.reply_to_message:
+    if not trigger:
+        return
+
+    if not trigger.reply_to_message:
+        err = await trigger.reply_text("❌ Responde a una foto o video.", parse_mode="Markdown")
+        asyncio.create_task(asyncio.sleep(3)).add_done_callback(lambda _: asyncio.create_task(err.delete()))
         return
 
     target = trigger.reply_to_message
@@ -110,24 +102,18 @@ async def mover_referencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = make_caption(target.caption, mention)
     mgid    = target.media_group_id
 
-    if mgid:
-        # Si es un álbum, lanzamos la tarea pesada al subsuelo con bloqueo de duplicados
-        asyncio.create_task(
-            procesar_y_enviar_album(context, trigger.chat_id, mgid, trigger, target, mention, caption)
+    # ⚡ OPTIMIZACIÓN 1: Borrar el comando inmediatamente sin esperar a Telegram
+    try:
+        asyncio.create_task(trigger.delete())
+    except:
+        pass
+
+    # ⚡ OPTIMIZACIÓN 2: Lanzar la copia en un hilo de fondo. El bot queda libre al instante.
+    asyncio.create_task(
+        proceso_subterrano_copia(
+            context, trigger.chat_id, target, trigger, mention, caption, mgid
         )
-    else:
-        # Si es una sola foto individual, se ejecuta AL INSTANTE en 0.1 segundos sin esperas
-        try:
-            try: asyncio.create_task(trigger.delete())
-            except: pass
-            
-            await context.bot.copy_message(
-                chat_id=ID_SUPERGRUPO, from_chat_id=trigger.chat_id, message_id=target.message_id,
-                message_thread_id=ID_TEMA_REFES, caption=caption, parse_mode="HTML"
-            )
-            await target.reply_text(f"✅ ¡Esta referencia fue guardada con éxito por {mention} en el tema de Refes!", parse_mode="HTML")
-        except Exception as e:
-            print(f"Error en foto individual: {e}")
+    )
 
 def main():
     token = os.environ.get("TOKEN")
@@ -136,14 +122,11 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # El acumulador se registra primero para interceptar toda la multimedia del grupo
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS, accumulate), group=-1)
     app.add_handler(CommandHandler("refe", mover_referencia))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^\.refe"), mover_referencia))
 
-    # drop_pending_updates=True limpia mensajes viejos acumulados durante crasheos
     app.run_polling(drop_pending_updates=True, close_loop=False)
 
 if __name__ == "__main__":
     main()
-    
